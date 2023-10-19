@@ -12,3 +12,5 @@ wandb*
 
 #pycache
 __pycache__
+
+data/
