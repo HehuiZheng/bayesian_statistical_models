@@ -66,7 +66,8 @@ def mse(W, b, x_batched, y_batched):
 
 if __name__ == '__main__':
 
-    log_dir = '/cluster/scratch/zhengh/brnn_soft_trunk_arm'
+    # log_dir = '/cluster/scratch/zhengh/brnn_soft_trunk_arm'
+    log_dir = '/cluster/home/zhengh/OpAx_soft_robots/bayesian_statistical_models/results/soft_trunk_arm/brnn_soft_trunk_arm/'
     os.makedirs(log_dir, exist_ok=True)
 
     import matplotlib.pyplot as plt
@@ -128,7 +129,7 @@ if __name__ == '__main__':
     model = BRNNStatisticalModel(input_dim=input_dim, output_dim=output_dim, output_stds=data_std, logging_wandb=log_training,
                                 beta=jnp.ones((output_dim, )),  # beta=jnp.array([1.0, 1.0]), 
                                 num_particles=10, features=[64, 64, 64],
-                                bnn_type=ProbabilisticGRUEnsemble, train_share=0.6, num_training_steps=1,
+                                bnn_type=ProbabilisticGRUEnsemble, train_share=0.6, num_training_steps=10000,
                                 weight_decay=1e-4, hidden_state_size=20, num_cells=1)
 
     print("Start training")

@@ -37,6 +37,45 @@ def load_data(path):
     y_train = jnp.concatenate(y_train)
     return x_train, y_train
 
+def load_episode_data(dir):
+    s_raw = jnp.load(os.path.join(dir, "x.npy"))
+    u_raw = jnp.load(os.path.join(dir, "u.npy"))
+
+    x_raw = jnp.concatenate([s_raw[:,:-1,:], u_raw], axis=-1)
+    y_raw = s_raw[:,1:,:]
+    return x_raw, y_raw
+
+def predict_single(model, state, xs, ys, SAVE_FIG, result_dir, img_name):
+    preds = vmap(model, in_axes=(0, None),
+                 out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
+                                                 statistical_model_state=None))(xs, state)
+    plot_3d(ys, preds.mean, save_fig=SAVE_FIG, img_dir=result_dir, img_name=img_name)
+    test_mse = jnp.mean(jnp.inner(ys-preds.mean, ys-preds.mean) / 2.0)
+    return test_mse.item()
+
+def rollout_model(model, state, test_xs, test_ys, save_fig, result_dir):
+    multi_step_test_mse  = []
+    pred_state = state
+    x = test_xs[:, 0, :]
+    num_visualize = 20
+    rollout_data = []
+    for i in range(window_size):
+        preds = vmap(model, in_axes=(0, None),
+                out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
+                                                statistical_model_state=None))(x, pred_state)
+        pred_state = preds.statistical_model_state
+        x = jnp.concatenate([preds.mean, test_xs[:, i+1, -6:]], axis=-1) if (i+1) < window_size else None
+        multi_step_test_mse.append(jnp.mean(jnp.inner(test_ys[:, i, :]-preds.mean, test_ys[:, i, :]-preds.mean) / 2.0).item())
+        if save_fig:
+            rollout_data.append(preds.mean[:num_visualize])  # episode x state
+
+    if save_fig:
+        rollout_data = jnp.stack(rollout_data, axis=1)
+        print(rollout_data.shape)
+        for i in range(num_visualize):
+            plot_3d(test_ys[i], rollout_data[i], save_fig=save_fig, img_dir=result_dir, img_name='test_multi_' + str(i).zfill(2)+'.png')
+    print(multi_step_test_mse)
+    return jnp.array(multi_step_test_mse)
 
 def plot_3d(ys, preds_mean, save_fig=False, img_dir=None, img_name=None):
     ax = plt.figure(figsize=(32,24)).add_subplot(projection='3d')
@@ -57,97 +96,73 @@ def plot_3d(ys, preds_mean, save_fig=False, img_dir=None, img_name=None):
         plt.show()
     return
 
-def mse(W, b, x_batched, y_batched):
-    # Define the squared loss for a single pair (x,y)
-    def squared_error(y, y_pred):
-        return jnp.inner(y-y_pred, y-y_pred) / 2.0
-    # We vectorize the previous to compute the average of the loss on all samples.
-    return jnp.mean(jax.vmap(squared_error)(x_batched, y_batched), axis=0)
-
 if __name__ == '__main__':
-
-    log_dir = '/cluster/scratch/zhengh/brnn_soft_trunk_arm'
-    os.makedirs(log_dir, exist_ok=True)
+    # log_dir = '/cluster/scratch/zhengh/brnn_soft_trunk_arm'
+    log_dir = '/cluster/home/zhengh/OpAx_soft_robots/bayesian_statistical_models/results/soft_trunk_arm/brnn_soft_trunk_arm'
+    timestamp = '1698080659.7018533'
+    result_dir = os.path.join(log_dir, timestamp)
+    save_dir = os.path.join(result_dir, 'test_results')
+    os.makedirs(save_dir, exist_ok=True)
 
     import matplotlib.pyplot as plt
     SAVE_FIG = True
-    if SAVE_FIG:
-        import time
-        timestamp = time.time()
-        result_dir = os.path.join(log_dir, str(timestamp))
-        os.makedirs(result_dir, exist_ok=True)
-    else:
-        result_dir = None
-
 
     key = jr.PRNGKey(0)
     input_dim = 12 + 6  # state 12 + action 6
     output_dim = 12  # next state 12
-
     noise_level = 0.1
 
-    window_size = 10
-    s_raw = jnp.load(os.path.join('../data/trunk_armV4', "x.npy"))
-    u_raw = jnp.load(os.path.join('../data/trunk_armV4', "u.npy"))
-
-    x_raw = jnp.concatenate([s_raw[:,:-1,:], u_raw], axis=-1)
-    y_raw = s_raw[:,1:,:]
+    x_raw, y_raw = load_episode_data('../data/trunk_armV4')
 
     episode = x_raw.shape[0]
-
     split = 120
-
-    x_train = []
-    y_train = []
-    for i in range(split):
-        xs = x_raw[i][4:]
-        ys = y_raw[i][4:]
-        x_train.append(create_windowed_array(xs, window_size=window_size))
-        y_train.append(create_windowed_array(ys, window_size=window_size))
-    x_train = jnp.concatenate(x_train)
-    y_train = jnp.concatenate(y_train)
-
-    print("Training data loaded")
-
     data_std = noise_level * jnp.ones(shape=(output_dim,))  # data_std
-    data = Data(inputs=x_train, outputs=y_train)
 
-
-    print("Init model")
-
-    model = BRNNStatisticalModel(input_dim=input_dim, output_dim=output_dim, output_stds=data_std, logging_wandb=log_training,
+    print("Creating model")
+    model = BRNNStatisticalModel(input_dim=input_dim, output_dim=output_dim, output_stds=data_std, logging_wandb=False,
                                 beta=jnp.ones((output_dim, )),  # beta=jnp.array([1.0, 1.0]), 
                                 num_particles=10, features=[64, 64, 64],
-                                bnn_type=ProbabilisticGRUEnsemble, train_share=0.6, num_training_steps=1,
+                                bnn_type=ProbabilisticGRUEnsemble, train_share=0.6, num_training_steps=10000,
                                 weight_decay=1e-4, hidden_state_size=20, num_cells=1)
 
     print("Load model state")
-    statistical_model_state = None
+    import pickle
+    with open(os.path.join(result_dir, 'model.pkl'), "rb") as handle:
+        state = pickle.load(handle)
 
+    print("Single-step prediction")
     x_train_all = jnp.concatenate(x_raw[:split,4:], axis=0)
     y_train_all = jnp.concatenate(y_raw[:split,4:], axis=0)
-    preds = vmap(model, in_axes=(0, None),
-                 out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
-                                                 statistical_model_state=None))(x_train_all, statistical_model_state)
-    # plot_3d(y_train_all, preds.mean, save_fig=SAVE_FIG, img_dir=result_dir, img_name='train.png')
-
-    train_mse = jnp.mean(jnp.inner(y_train_all-preds.mean, y_train_all-preds.mean) / 2.0)
-
-    print("Train MSE: " + str(train_mse.item()))
+    train_mse = predict_single(model, state, x_train_all, y_train_all, SAVE_FIG, save_dir, 'train.png')
+    print("Train MSE: " + str(train_mse))
 
     x_test_all = jnp.concatenate(x_raw[split:episode,4:], axis=0)
     y_test_all = jnp.concatenate(y_raw[split:episode,4:], axis=0)
-    preds = vmap(model, in_axes=(0, None),
+    test_mse = predict_single(model, state, x_test_all, y_test_all, SAVE_FIG, save_dir, 'test.png')
+    print("Test MSE: " + str(test_mse))
+
+    print("Visualize single-step prediction")
+    for i in range(10):
+        train_xs = x_raw[i,4:]
+        train_ys = y_raw[i,4:]
+        preds = vmap(model, in_axes=(0, None),
                  out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
-                                                 statistical_model_state=None))(x_test_all, statistical_model_state)
-    # plot_3d(y_test_all, preds.mean, save_fig=SAVE_FIG, img_dir=result_dir, img_name='test.png')
+                                                 statistical_model_state=None))(train_xs, state)
+        plot_3d(train_ys, preds.mean, save_fig=SAVE_FIG, img_dir=save_dir, img_name="train_single_" + str(i).zfill(2)+'.png')
 
-    test_mse = jnp.mean(jnp.inner(y_test_all-preds.mean, y_test_all-preds.mean) / 2.0)
+    for i in range(10):
+        test_xs = x_raw[split+i,4:]
+        test_ys = y_raw[split+i,4:]
+        preds = vmap(model, in_axes=(0, None),
+                 out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
+                                                 statistical_model_state=None))(test_xs, state)
+        plot_3d(test_ys, preds.mean, save_fig=SAVE_FIG, img_dir=save_dir, img_name="test_single_" + str(i).zfill(2)+'.png')
 
-    print("Test MSE: " + str(test_mse.item()))
 
-
+    print("Multi-step prediction")
     # Test multi-step prediction
+    window_size = 10
+
     x_test = []
     y_test = []
     for i in range(split, episode):
@@ -158,61 +173,18 @@ if __name__ == '__main__':
     
     x_test = jnp.concatenate(x_test)
     y_test = jnp.concatenate(y_test)
-    multi_step_test_mse = jnp.zeros(window_size)
 
-    
-    # def f(carry, _):
-    #     preds = carry
-    #     preds = vmap(model, in_axes=(0, None),
-    #              out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
-    #                                              statistical_model_state=None))(preds.mean, statistical_model_state)
-    #     step_mse = jnp.mean(jnp.inner(y_test-preds.mean, y_test-preds.mean) / 2.0)
-    #     return (preds), step_mse
-
-    # init_carry = (x_test[:, 0, :])
-    # import jax
-    # (opt_state), step_mse = jax.lax.scan(f, init_carry, None, length=window_size)
-
-    # for i in range(window_size):
-    #     multi_step_test_mse[i] = jax.tree_util.tree_map(lambda x: x[i], step_mse)
-
-    def rollout_model(model, state, test_xs, test_ys):
-        pred_state = state
-        x = test_xs[:, [0], :]
-        for i in range(window_size):
-            # preds = model(x, pred_state)
-
-            preds = vmap(model, in_axes=(0, None),
-                 out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
-                                                 statistical_model_state=None))(x, pred_state)
-
-            pred_state = preds.statistical_model_state
-            x = preds.mean
-            multi_step_test_mse[i] = jnp.mean(jnp.inner(y_test[:, i, :]-preds.mean, y_test[:, i, :]-preds.mean) / 2.0).item()
-    
-    rollout_model(model, statistical_model_state, x_test, y_test)
+    multi_step_test_mse = rollout_model(model, state, x_test, y_test, SAVE_FIG, save_dir,)
 
     print("Multi-step Test MSE: ")
     print(multi_step_test_mse)
 
-    
+    result_dict = {
+        'train_mse': train_mse,
+        'test_mse': test_mse,
+        'multi_step_test_mse': multi_step_test_mse
+    }
 
-    for i in range(10):
-        train_xs = x_raw[i,4:]
-        train_ys = y_raw[i,4:]
-        preds = vmap(model, in_axes=(0, None),
-                 out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
-                                                 statistical_model_state=None))(train_xs, statistical_model_state)
-        plot_3d(train_ys, preds.mean, save_fig=SAVE_FIG, img_dir=result_dir, img_name="train" + str(i).zfill(2)+'.png')
-
-    for i in range(10):
-        test_xs = x_raw[split+i,4:]
-        test_ys = y_raw[split+i,4:]
-        preds = vmap(model, in_axes=(0, None),
-                 out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
-                                                 statistical_model_state=None))(test_xs, statistical_model_state)
-        plot_3d(test_ys, preds.mean, save_fig=SAVE_FIG, img_dir=result_dir, img_name="test" + str(i).zfill(2)+'.png')
-
-
-
-        
+    import json
+    with open(os.path.join(save_dir, 'mse.json'), "w") as outfile:
+        json.dump(result_dict, outfile)

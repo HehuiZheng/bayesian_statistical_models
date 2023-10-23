@@ -50,27 +50,26 @@ def predict_single(model, state, xs, ys, SAVE_FIG, result_dir, img_name):
                                                  statistical_model_state=None))(xs, state)
     plot_3d(ys, preds.mean, save_fig=SAVE_FIG, img_dir=result_dir, img_name=img_name)
     test_mse = jnp.mean(jnp.inner(ys-preds.mean, ys-preds.mean) / 2.0)
-    print("Test MSE: " + str(test_mse.item()))
     return test_mse.item()
 
 def rollout_model(model, state, test_xs, test_ys, save_fig, result_dir):
     multi_step_test_mse  = []
     pred_state = state
     x = test_xs[:, 0, :]
-    num_visualize = 10
+    num_visualize = 20
     rollout_data = []
     for i in range(window_size):
-        if save_fig:
-            rollout_data.append(x[:num_visualize])
         preds = vmap(model, in_axes=(0, None),
                 out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
                                                 statistical_model_state=None))(x, pred_state)
         pred_state = preds.statistical_model_state
-        x = jnp.concatenate([preds.mean, test_xs[:, i+1, :]], axis=-1) if (i+1) < window_size else None
+        x = jnp.concatenate([preds.mean, test_xs[:, i+1, -6:]], axis=-1) if (i+1) < window_size else None
         multi_step_test_mse.append(jnp.mean(jnp.inner(test_ys[:, i, :]-preds.mean, test_ys[:, i, :]-preds.mean) / 2.0).item())
-    
+        if save_fig:
+            rollout_data.append(preds.mean[:num_visualize])
+
     if save_fig:
-        rollout_data = jnp.concatenate(rollout_model, axis=1)
+        rollout_data = jnp.stack(rollout_data, axis=1)
         for i in range(num_visualize):
             plot_3d(test_ys[i], rollout_data[i], save_fig=save_fig, img_dir=result_dir, img_name='test_multi_' + str(i).zfill(2)+'.png')
     
@@ -96,11 +95,12 @@ def plot_3d(ys, preds_mean, save_fig=False, img_dir=None, img_name=None):
     return
 
 if __name__ == '__main__':
-    log_dir = '/cluster/scratch/zhengh/bnn_soft_trunk_arm'
+    # log_dir = '/cluster/scratch/zhengh/bnn_soft_trunk_arm'
+    log_dir = '/cluster/home/zhengh/OpAx_soft_robots/bayesian_statistical_models/results/soft_trunk_arm//bnn_soft_trunk_arm'
     timestamp = '1698077409.647479'
     result_dir = os.path.join(log_dir, timestamp)
     save_dir = os.path.join(result_dir, 'test_results')
-    # os.makedirs(save_dir, exist_ok=True)
+    os.makedirs(save_dir, exist_ok=True)
 
     import matplotlib.pyplot as plt
     SAVE_FIG = True
@@ -146,7 +146,7 @@ if __name__ == '__main__':
         preds = vmap(model, in_axes=(0, None),
                  out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
                                                  statistical_model_state=None))(train_xs, state)
-        plot_3d(train_ys, preds.mean, save_fig=SAVE_FIG, img_dir=result_dir, img_name="train_single_" + str(i).zfill(2)+'.png')
+        plot_3d(train_ys, preds.mean, save_fig=SAVE_FIG, img_dir=save_dir, img_name="train_single_" + str(i).zfill(2)+'.png')
 
     for i in range(10):
         test_xs = x_raw[split+i,4:]
@@ -154,7 +154,7 @@ if __name__ == '__main__':
         preds = vmap(model, in_axes=(0, None),
                  out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
                                                  statistical_model_state=None))(test_xs, state)
-        plot_3d(test_ys, preds.mean, save_fig=SAVE_FIG, img_dir=result_dir, img_name="test_single_" + str(i).zfill(2)+'.png')
+        plot_3d(test_ys, preds.mean, save_fig=SAVE_FIG, img_dir=save_dir, img_name="test_single_" + str(i).zfill(2)+'.png')
 
 
     print("Multi-step prediction")
@@ -172,7 +172,6 @@ if __name__ == '__main__':
     
     x_test = jnp.concatenate(x_test)
     y_test = jnp.concatenate(y_test)
-    # multi_step_test_mse = jnp.zeros(window_size)
 
     multi_step_test_mse = rollout_model(model, state, x_test, y_test, SAVE_FIG, save_dir,)
 
