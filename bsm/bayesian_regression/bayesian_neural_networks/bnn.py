@@ -144,8 +144,7 @@ class BayesianNeuralNet(BayesianRegressionModel[BNNState]):
     def _init(self, key):
         variables = self.model.init(key, jnp.ones(shape=(self.input_dim,)))
         if 'params' in variables:
-            # stats, params = variables.pop('params')  # ValueError: too many values to unpack
-            params = variables.pop('params')
+            stats, params = variables.pop('params') 
         else:
             stats, params = variables
         del variables  # Delete variables to avoid wasting resources

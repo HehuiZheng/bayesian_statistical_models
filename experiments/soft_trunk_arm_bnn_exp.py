@@ -5,16 +5,15 @@ import jax.random as jr
 import optax
 from jax import vmap
 
-from bsm.bayesian_regression.bayesian_recurrent_neural_networks.rnn_ensembles import RNNState
+from bsm.bayesian_regression.bayesian_neural_networks.bnn import BNNState
 from bsm.bayesian_regression.bayesian_neural_networks.bnn import BayesianNeuralNet
-from bsm.bayesian_regression.bayesian_recurrent_neural_networks.rnn_ensembles import DeterministicGRUEnsemble, \
-    ProbabilisticGRUEnsemble
-from bsm.utils.general_utils import create_windowed_array
-import jax.random as random
+from bsm.bayesian_regression.bayesian_neural_networks.deterministic_ensembles import DeterministicEnsemble
+from bsm.bayesian_regression.bayesian_neural_networks.probabilistic_ensembles import ProbabilisticEnsemble
+from bsm.bayesian_regression.bayesian_neural_networks.fsvgd_ensemble import DeterministicFSVGDEnsemble, ProbabilisticFSVGDEnsemble
 from bsm.statistical_model.abstract_statistical_model import StatisticalModel
 from bsm.utils.normalization import Data
 from bsm.utils.type_aliases import StatisticalModelState, StatisticalModelOutput
-from bsm.statistical_model.brnn_statistical_model import BRNNStatisticalModel
+from bsm.statistical_model.bnn_statistical_model import BNNStatisticalModel
 
 
 def load_data(path):
@@ -57,16 +56,8 @@ def plot_3d(ys, preds_mean, save_fig=False, img_dir=None, img_name=None):
         plt.show()
     return
 
-def mse(W, b, x_batched, y_batched):
-    # Define the squared loss for a single pair (x,y)
-    def squared_error(y, y_pred):
-        return jnp.inner(y-y_pred, y-y_pred) / 2.0
-    # We vectorize the previous to compute the average of the loss on all samples.
-    return jnp.mean(jax.vmap(squared_error)(x_batched, y_batched), axis=0)
-
 if __name__ == '__main__':
-
-    log_dir = '/cluster/scratch/zhengh/brnn_soft_trunk_arm'
+    log_dir = '/cluster/scratch/zhengh/bnn_soft_trunk_arm'
     os.makedirs(log_dir, exist_ok=True)
 
     import matplotlib.pyplot as plt
@@ -85,18 +76,15 @@ if __name__ == '__main__':
     if log_training:
         wandb.init(
             dir=log_dir,
-            project='soft_arm_brnn',
+            project='soft_arm_bnn',
             group='test group',
         )
-
 
     key = jr.PRNGKey(0)
     input_dim = 12 + 6  # state 12 + action 6
     output_dim = 12  # next state 12
-
     noise_level = 0.1
 
-    window_size = 10
     s_raw = jnp.load(os.path.join('../data/trunk_armV4', "x.npy"))
     u_raw = jnp.load(os.path.join('../data/trunk_armV4', "u.npy"))
 
@@ -104,18 +92,10 @@ if __name__ == '__main__':
     y_raw = s_raw[:,1:,:]
 
     episode = x_raw.shape[0]
-
     split = 120
 
-    x_train = []
-    y_train = []
-    for i in range(split):
-        xs = x_raw[i][4:]
-        ys = y_raw[i][4:]
-        x_train.append(create_windowed_array(xs, window_size=window_size))
-        y_train.append(create_windowed_array(ys, window_size=window_size))
-    x_train = jnp.concatenate(x_train)
-    y_train = jnp.concatenate(y_train)
+    x_train = jnp.concatenate(x_raw[:split,4:], axis=0)
+    y_train = jnp.concatenate(y_raw[:split,4:], axis=0)
 
     print("Training data loaded")
 
@@ -125,11 +105,11 @@ if __name__ == '__main__':
 
     print("Creating model")
 
-    model = BRNNStatisticalModel(input_dim=input_dim, output_dim=output_dim, output_stds=data_std, logging_wandb=log_training,
-                                beta=jnp.ones((output_dim, )),  # beta=jnp.array([1.0, 1.0]), 
+    model = BNNStatisticalModel(input_dim=input_dim, output_dim=output_dim, output_stds=data_std, logging_wandb=log_training,
+                                beta=jnp.ones((output_dim)),  # beta=jnp.array([1.0, 1.0]), 
                                 num_particles=10, features=[64, 64, 64],
-                                bnn_type=ProbabilisticGRUEnsemble, train_share=0.6, num_training_steps=1,
-                                weight_decay=1e-4, hidden_state_size=20, num_cells=1)
+                                bnn_type=ProbabilisticFSVGDEnsemble, train_share=0.6, num_training_steps=10000,
+                                weight_decay=1e-4, )
 
     print("Start training")
     init_model_state = model.init(key=jr.PRNGKey(0))
@@ -137,6 +117,7 @@ if __name__ == '__main__':
 
     print("Finish training")
 
+    
     import pickle
     with open(os.path.join(result_dir, 'model.pkl'), "wb") as handle:
         pickle.dump(statistical_model_state, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -146,30 +127,29 @@ if __name__ == '__main__':
     import sys
     sys.exit(1)
 
-    x_train_all = jnp.concatenate(x_raw[:split,4:], axis=0)
-    y_train_all = jnp.concatenate(y_raw[:split,4:], axis=0)
-    preds = vmap(model, in_axes=(0, None),
-                 out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
-                                                 statistical_model_state=None))(x_train_all, statistical_model_state)
-    # plot_3d(y_train_all, preds.mean, save_fig=SAVE_FIG, img_dir=result_dir, img_name='train.png')
+    with open(os.path.join(result_dir, 'model.pkl'), "rb") as handle:
+        statistical_model_state = pickle.load(handle)
 
-    train_mse = jnp.mean(jnp.inner(y_train_all-preds.mean, y_train_all-preds.mean) / 2.0)
+    # preds = vmap(model, in_axes=(0, None),
+    #             out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
+    #                                             statistical_model_state=None))(x_train, statistical_model_state)
+    # plot_3d(y_train, preds.mean, save_fig=SAVE_FIG, img_dir=result_dir, img_name='train.png')
+    # train_mse = jnp.mean(jnp.inner(y_train-preds.mean, y_train-preds.mean) / 2.0)
+    # print("Train MSE: " + str(train_mse.item()))
 
-    print("Train MSE: " + str(train_mse.item()))
-
-    x_test_all = jnp.concatenate(x_raw[split:episode,4:], axis=0)
-    y_test_all = jnp.concatenate(y_raw[split:episode,4:], axis=0)
-    preds = vmap(model, in_axes=(0, None),
-                 out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
-                                                 statistical_model_state=None))(x_test_all, statistical_model_state)
+    # x_test_all = jnp.concatenate(x_raw[split:episode,4:], axis=0)
+    # y_test_all = jnp.concatenate(y_raw[split:episode,4:], axis=0)
+    # preds = vmap(model, in_axes=(0, None),
+    #              out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
+    #                                              statistical_model_state=None))(x_test_all, statistical_model_state)
     # plot_3d(y_test_all, preds.mean, save_fig=SAVE_FIG, img_dir=result_dir, img_name='test.png')
-
-    test_mse = jnp.mean(jnp.inner(y_test_all-preds.mean, y_test_all-preds.mean) / 2.0)
-
-    print("Test MSE: " + str(test_mse.item()))
-
+    # test_mse = jnp.mean(jnp.inner(y_test_all-preds.mean, y_test_all-preds.mean) / 2.0)
+    # print("Test MSE: " + str(test_mse.item()))
 
     # Test multi-step prediction
+    window_size = 10
+    from bsm.utils.general_utils import create_windowed_array
+
     x_test = []
     y_test = []
     for i in range(split, episode):
@@ -180,27 +160,12 @@ if __name__ == '__main__':
     
     x_test = jnp.concatenate(x_test)
     y_test = jnp.concatenate(y_test)
-    multi_step_test_mse = jnp.zeros(window_size)
-
-    
-    # def f(carry, _):
-    #     preds = carry
-    #     preds = vmap(model, in_axes=(0, None),
-    #              out_axes=StatisticalModelOutput(mean=0, epistemic_std=0, aleatoric_std=0,
-    #                                              statistical_model_state=None))(preds.mean, statistical_model_state)
-    #     step_mse = jnp.mean(jnp.inner(y_test-preds.mean, y_test-preds.mean) / 2.0)
-    #     return (preds), step_mse
-
-    # init_carry = (x_test[:, 0, :])
-    # import jax
-    # (opt_state), step_mse = jax.lax.scan(f, init_carry, None, length=window_size)
-
-    # for i in range(window_size):
-    #     multi_step_test_mse[i] = jax.tree_util.tree_map(lambda x: x[i], step_mse)
+    # multi_step_test_mse = jnp.zeros(window_size)
+    multi_step_test_mse  = []
 
     def rollout_model(model, state, test_xs, test_ys):
         pred_state = state
-        x = test_xs[:, [0], :]
+        x = test_xs[:, 0, :]
         for i in range(window_size):
             # preds = model(x, pred_state)
 
@@ -210,14 +175,14 @@ if __name__ == '__main__':
 
             pred_state = preds.statistical_model_state
             x = preds.mean
-            multi_step_test_mse[i] = jnp.mean(jnp.inner(y_test[:, i, :]-preds.mean, y_test[:, i, :]-preds.mean) / 2.0).item()
-    
+            print(x.shape)
+            multi_step_test_mse.append(jnp.mean(jnp.inner(y_test[:, i, :]-preds.mean, y_test[:, i, :]-preds.mean) / 2.0).item())
+            print(multi_step_test_mse)
+
     rollout_model(model, statistical_model_state, x_test, y_test)
 
     print("Multi-step Test MSE: ")
     print(multi_step_test_mse)
-
-    
 
     for i in range(10):
         train_xs = x_raw[i,4:]
@@ -235,6 +200,3 @@ if __name__ == '__main__':
                                                  statistical_model_state=None))(test_xs, statistical_model_state)
         plot_3d(test_ys, preds.mean, save_fig=SAVE_FIG, img_dir=result_dir, img_name="test" + str(i).zfill(2)+'.png')
 
-
-
-        

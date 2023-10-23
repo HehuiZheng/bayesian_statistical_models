@@ -79,16 +79,6 @@ if __name__ == '__main__':
     else:
         result_dir = None
 
-    log_training = False
-    
-    import wandb
-    if log_training:
-        wandb.init(
-            dir=log_dir,
-            project='soft_arm_brnn',
-            group='test group',
-        )
-
 
     key = jr.PRNGKey(0)
     input_dim = 12 + 6  # state 12 + action 6
@@ -123,7 +113,7 @@ if __name__ == '__main__':
     data = Data(inputs=x_train, outputs=y_train)
 
 
-    print("Creating model")
+    print("Init model")
 
     model = BRNNStatisticalModel(input_dim=input_dim, output_dim=output_dim, output_stds=data_std, logging_wandb=log_training,
                                 beta=jnp.ones((output_dim, )),  # beta=jnp.array([1.0, 1.0]), 
@@ -131,20 +121,8 @@ if __name__ == '__main__':
                                 bnn_type=ProbabilisticGRUEnsemble, train_share=0.6, num_training_steps=1,
                                 weight_decay=1e-4, hidden_state_size=20, num_cells=1)
 
-    print("Start training")
-    init_model_state = model.init(key=jr.PRNGKey(0))
-    statistical_model_state = model.update(model_state=init_model_state, data=data)
-
-    print("Finish training")
-
-    import pickle
-    with open(os.path.join(result_dir, 'model.pkl'), "wb") as handle:
-        pickle.dump(statistical_model_state, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    
-    print("Model state saved")
-
-    import sys
-    sys.exit(1)
+    print("Load model state")
+    statistical_model_state = None
 
     x_train_all = jnp.concatenate(x_raw[:split,4:], axis=0)
     y_train_all = jnp.concatenate(y_raw[:split,4:], axis=0)
